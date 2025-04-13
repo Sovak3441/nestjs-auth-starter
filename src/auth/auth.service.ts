@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
@@ -62,5 +62,33 @@ export class AuthService {
     } catch {
       throw new UnauthorizedException('Ugyldig refresh-token');
     }
+  }
+
+  async getUserInfo(userId: number) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        roles: {
+          include: {
+            permissions: true,
+          },
+        },
+      },
+    });
+
+    if (!user) throw new NotFoundException('Bruker ikke funnet');
+
+    const permissions = user.roles.flatMap((role) =>
+      role.permissions.map((p) => p.key),
+    );
+
+    return {
+      id: user.id,
+      email: user.email,
+      roles: user.roles.map((r) => r.name),
+      permissions: [...new Set(permissions)],
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
   }
 }

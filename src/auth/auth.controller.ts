@@ -11,9 +11,8 @@ export class AuthController {
 
   @UseGuards(AuthGuard('jwt'))
   @Get('me')
-  me(@CurrentUser() user: any) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-return
-    return user;
+  me(@CurrentUser() user: { userId: number }) {
+    return this.auth.getUserInfo(user.userId);
   }
 
   @Post('register')
