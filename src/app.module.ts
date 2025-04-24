@@ -1,4 +1,5 @@
 import { Module, OnModuleInit } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { PrismaModule } from './prisma/prisma.module';
@@ -7,7 +8,7 @@ import { AuthModule } from './auth/auth.module';
 import { PermissionSeederService } from './auth/services/permission-seeder.service';
 
 @Module({
-  imports: [PrismaModule, UserModule, AuthModule],
+  imports: [ScheduleModule.forRoot(), PrismaModule, UserModule, AuthModule],
   controllers: [AppController],
   providers: [AppService, PermissionSeederService],
 })

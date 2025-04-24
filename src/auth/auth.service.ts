@@ -1,12 +1,13 @@
-import { Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-
-type JwtPayload = {
-  sub: number;
-  email: string;
-};
+import * as crypto from 'crypto';
+import { Request, Response } from 'express';
 
 @Injectable()
 export class AuthService {
@@ -15,53 +16,118 @@ export class AuthService {
     private jwt: JwtService,
   ) {}
 
-  private generateTokens(userId: number, email: string) {
+  private generateAccessToken(userId: number, email: string): string {
     const payload = { sub: userId, email };
-
-    const accessToken = this.jwt.sign(payload, {
+    return this.jwt.sign(payload, {
       secret: process.env.JWT_SECRET,
       expiresIn: process.env.JWT_EXPIRES_IN || '15m',
     });
+  }
 
-    const refreshToken = this.jwt.sign(payload, {
-      secret: process.env.JWT_REFRESH_SECRET,
-      expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
+  private async createRefreshToken(
+    userId: number,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<string> {
+    const refreshToken = crypto.randomBytes(64).toString('hex');
+    const tokenHash = await bcrypt.hash(refreshToken, 10);
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+
+    await this.prisma.userToken.create({
+      data: {
+        tokenHash,
+        userId,
+        expiresAt,
+        ipAddress: ip,
+        userAgent: userAgent,
+      },
     });
 
-    return { accessToken, refreshToken };
+    return refreshToken;
   }
 
   async register(email: string, password: string) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-    const hashed: string = await bcrypt.hash(password, 10);
+    const hashed = await bcrypt.hash(password, 10);
     const user = await this.prisma.user.create({
       data: { email, password: hashed },
     });
 
-    return this.generateTokens(user.id, user.email);
+    return { accessToken: this.generateAccessToken(user.id, user.email) };
   }
 
-  async login(email: string, password: string) {
+  async login(email: string, password: string, req: Request, res: Response) {
     const user = await this.prisma.user.findUnique({ where: { email } });
     if (!user) throw new UnauthorizedException('Feil e-post eller passord');
 
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) throw new UnauthorizedException('Feil e-post eller passord');
 
-    return this.generateTokens(user.id, user.email);
+    const accessToken = this.generateAccessToken(user.id, user.email);
+    const refreshToken = await this.createRefreshToken(
+      user.id,
+      req.ip,
+      req.headers['user-agent'],
+    );
+
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    return { accessToken };
   }
 
-  async refresh(token: string) {
-    try {
-      const payload = this.jwt.verify(token, {
-        secret: process.env.JWT_REFRESH_SECRET,
-      }) as JwtPayload;
+  async refresh(req: Request, res: Response) {
+    const token = req.cookies?.refreshToken;
+    if (!token) throw new UnauthorizedException('Mangler refresh-token');
 
-      return this.generateTokens(payload.sub, payload.email);
-    } catch {
-      throw new UnauthorizedException('Ugyldig refresh-token');
+    const user = await this.prisma.user.findFirst({
+      where: {
+        RefreshToken: { some: {} }, // riktig relasjonsnavn!
+      },
+      include: {
+        RefreshToken: true,
+      },
+    });
+
+    if (!user || !user.RefreshToken?.length)
+      throw new UnauthorizedException('Ingen refresh-tokens');
+
+    const validRefresh = user.RefreshToken.find((rt) =>
+      bcrypt.compareSync(token, rt.tokenHash),
+    );
+
+    if (!validRefresh || validRefresh.expiresAt < new Date()) {
+      throw new UnauthorizedException('Ugyldig eller utløpt refresh-token');
     }
+
+    const accessToken = this.generateAccessToken(user.id, user.email);
+    const newRefreshToken = await this.createRefreshToken(
+      user.id,
+      req.ip,
+      req.headers['user-agent'],
+    );
+
+    await this.prisma.userToken.delete({
+      where: { id: validRefresh.id },
+    });
+
+    res.cookie('refreshToken', newRefreshToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    return { accessToken };
+  }
+
+  async logout(res: Response) {
+    res.clearCookie('refreshToken');
+    // TODO: valgfritt – slett tokens fra db også
   }
 
   async getUserInfo(userId: number) {
@@ -69,17 +135,15 @@ export class AuthService {
       where: { id: userId },
       include: {
         roles: {
-          include: {
-            permissions: true,
-          },
+          include: { permissions: true },
         },
       },
     });
 
     if (!user) throw new NotFoundException('Bruker ikke funnet');
 
-    const permissions = user.roles.flatMap((role) =>
-      role.permissions.map((p) => p.key),
+    const permissions = user.roles.flatMap((r) =>
+      r.permissions.map((p) => p.key),
     );
 
     return {
